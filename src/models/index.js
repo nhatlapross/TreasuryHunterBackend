@@ -165,14 +165,33 @@ const treasureDiscoverySchema = new mongoose.Schema({
   nftObjectId: {
     type: String,
     required: true,
-    match: /^0x[a-fA-F0-9]{64}$/
-    // REMOVED: unique: true
+    // 🆕 UPDATED: More flexible validation for NFT Object ID
+    validate: {
+      validator: function(v) {
+        // Allow hexadecimal (0x...) format or offline format
+        return /^0x[a-fA-F0-9]{64}$/.test(v) || /^offline_/.test(v);
+      },
+      message: 'NFT Object ID must be a valid Sui object ID (0x...) or offline format'
+    }
   },
   transactionDigest: {
     type: String,
     required: true,
-    match: /^[a-fA-F0-9]{64}$/
-    // REMOVED: unique: true
+    // 🆕 UPDATED: Support both Base58 (Sui) and hexadecimal formats
+    validate: {
+      validator: function(v) {
+        // Allow Base58 format (Sui transaction digests like: 4d31TeYDEzPbwGXKYejrs154daGkDo56jm1ACt2w7HRd)
+        // Allow hexadecimal format (0x...)
+        // Allow offline format
+        const base58Regex = /^[1-9A-HJ-NP-Za-km-z]{43,44}$/; // Base58 format
+        const hexRegex = /^[a-fA-F0-9]{64}$/; // 64-character hex
+        const hex0xRegex = /^0x[a-fA-F0-9]{64}$/; // 0x prefix hex
+        const offlineRegex = /^offline_/; // Offline transactions
+        
+        return base58Regex.test(v) || hexRegex.test(v) || hex0xRegex.test(v) || offlineRegex.test(v);
+      },
+      message: 'Transaction digest must be a valid Base58 or hexadecimal format'
+    }
   },
   locationProof: {
     type: mongoose.Schema.Types.Mixed,
@@ -212,8 +231,18 @@ const transactionSchema = new mongoose.Schema({
   digest: {
     type: String,
     required: true,
-    match: /^[a-fA-F0-9]{64}$/
-    // REMOVED: unique: true
+    // 🆕 UPDATED: Support both Base58 and hexadecimal formats
+    validate: {
+      validator: function(v) {
+        const base58Regex = /^[1-9A-HJ-NP-Za-km-z]{43,44}$/; // Base58 format (Sui)
+        const hexRegex = /^[a-fA-F0-9]{64}$/; // 64-character hex
+        const hex0xRegex = /^0x[a-fA-F0-9]{64}$/; // 0x prefix hex
+        const offlineRegex = /^offline_/; // Offline transactions
+        
+        return base58Regex.test(v) || hexRegex.test(v) || hex0xRegex.test(v) || offlineRegex.test(v);
+      },
+      message: 'Transaction digest must be a valid Base58 or hexadecimal format'
+    }
   },
   type: {
     type: String,
@@ -235,11 +264,23 @@ const transactionSchema = new mongoose.Schema({
   gasUsed: Number,
   fromAddress: {
     type: String,
-    match: /^0x[a-fA-F0-9]{64}$/
+    validate: {
+      validator: function(v) {
+        // Allow Sui address format or special values
+        return !v || /^0x[a-fA-F0-9]{64}$/.test(v) || v === 'faucet' || v === 'system';
+      },
+      message: 'From address must be a valid Sui address format'
+    }
   },
   toAddress: {
     type: String,
-    match: /^0x[a-fA-F0-9]{64}$/
+    validate: {
+      validator: function(v) {
+        // Allow Sui address format
+        return !v || /^0x[a-fA-F0-9]{64}$/.test(v);
+      },
+      message: 'To address must be a valid Sui address format'
+    }
   },
   metadata: {
     type: Map,

@@ -246,6 +246,72 @@ router.post('/test-decryption', auth, asyncHandler(async (req, res) => {
   }
 }));
 
+
+router.get('/blockchain-stats', auth, asyncHandler(async (req, res) => {
+  const userId = req.user.userId;
+
+  try {
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    if (!user.profileObjectId) {
+      return res.status(400).json({
+        success: false,
+        message: 'User does not have a blockchain profile',
+        data: {
+          hasProfile: false,
+          suggestion: 'Create blockchain profile first'
+        }
+      });
+    }
+
+    // 🆕 GET: Hunter stats from blockchain
+    const suiService = new SuiService();
+    const blockchainStats = await suiService.getHunterStats(user.profileObjectId);
+
+    // Get database stats for comparison
+    const hunterProfile = await HunterProfile.findOne({ userId });
+
+    res.json({
+      success: true,
+      data: {
+        blockchain: {
+          profileObjectId: user.profileObjectId,
+          stats: blockchainStats.stats,
+          explorerUrl: `https://explorer.sui.io/object/${user.profileObjectId}?network=${process.env.SUI_NETWORK || 'testnet'}`,
+          lastUpdated: blockchainStats.lastUpdated
+        },
+        database: hunterProfile ? {
+          rank: hunterProfile.rank,
+          totalTreasuresFound: hunterProfile.totalTreasuresFound,
+          totalScore: hunterProfile.totalScore,
+          currentStreak: hunterProfile.currentStreak
+        } : null,
+        comparison: {
+          synchronized: hunterProfile ? 
+            (blockchainStats.stats.totalTreasuresFound === hunterProfile.totalTreasuresFound) : 
+            false,
+          blockchainLeading: blockchainStats.stats.totalTreasuresFound > (hunterProfile?.totalTreasuresFound || 0),
+          databaseLeading: (hunterProfile?.totalTreasuresFound || 0) > blockchainStats.stats.totalTreasuresFound
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Failed to get blockchain stats:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get blockchain statistics',
+      error: error.message
+    });
+  }
+}));
+
 // Create hunter profile on blockchain
 router.post('/create-blockchain-profile', [
   body('username').optional().isLength({ min: 3, max: 50 }).matches(/^[a-zA-Z0-9_]+$/),

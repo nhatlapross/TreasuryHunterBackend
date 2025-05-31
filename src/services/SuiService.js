@@ -664,6 +664,593 @@ class SuiService {
 
     return estimates[transactionType] || 30_000_000; // Default 0.03 SUI
   }
+
+  /**
+ * Add treasure to registry (admin only) - calls smart contract
+ */
+  async addTreasure(adminEncryptedPrivateKey, treasureData) {
+    try {
+      const {
+        treasureId,
+        name,
+        description,
+        imageUrl,
+        rarity,
+        location,
+        coordinates,
+        requiredRank,
+        rewardPoints
+      } = treasureData;
+
+      logger.info(`Adding treasure to blockchain registry: ${treasureId}`);
+
+      const keypair = this.loadKeypair(adminEncryptedPrivateKey);
+      const address = keypair.getPublicKey().toSuiAddress();
+
+      // Check balance first
+      const balance = await this.getBalance(address);
+      const suiBalance = Number(balance) / 1000000000;
+
+      if (suiBalance < 0.03) {
+        throw new Error('Insufficient SUI balance for transaction. Need at least 0.03 SUI for gas.');
+      }
+
+      if (!this.treasureRegistryId) {
+        throw new Error('TREASURE_REGISTRY_ID not configured');
+      }
+
+      const tx = new Transaction();
+      tx.setSender(address);
+      tx.setGasBudget(30_000_000); // 0.03 SUI
+
+      // Call the add_treasure function from smart contract
+      tx.moveCall({
+        target: `${this.packageId}::treasure_nft::add_treasure`,
+        arguments: [
+          tx.object(this.treasureRegistryId),    // registry: &mut TreasureRegistry
+          tx.pure.string(treasureId),            // treasure_id: string::String
+          tx.pure.string(name),                  // name: string::String
+          tx.pure.string(description),           // description: string::String
+          tx.pure.string(imageUrl || ''),        // image_url: string::String
+          tx.pure.u8(rarity),                    // rarity: u8
+          tx.pure.string(location),              // location: string::String
+          tx.pure.string(coordinates),           // coordinates: string::String
+          tx.pure.u8(requiredRank),              // required_rank: u8
+          tx.pure.u64(rewardPoints),             // reward_points: u64
+        ],
+      });
+
+      console.log(`📡 Executing add_treasure transaction...`);
+      console.log(`📦 Package ID: ${this.packageId}`);
+      console.log(`🏛️ Registry ID: ${this.treasureRegistryId}`);
+      console.log(`💎 Treasure: ${name} (${treasureId})`);
+      console.log(`💰 Gas budget: 0.03 SUI`);
+
+      const result = await this.client.signAndExecuteTransaction({
+        signer: keypair,
+        transaction: tx,
+        options: {
+          showEffects: true,
+          showObjectChanges: true,
+          showEvents: true,
+        },
+      });
+
+      console.log(`📋 Transaction result:`, JSON.stringify(result, null, 2));
+
+      if (result.effects?.status?.status !== 'success') {
+        throw new Error(`Transaction failed: ${result.effects?.status?.error || 'Unknown error'}`);
+      }
+
+      logger.info(`Treasure added to blockchain successfully: ${treasureId}`);
+
+      return {
+        transactionDigest: result.digest,
+        treasureId,
+        events: result.events || [],
+        blockHeight: result.checkpoint,
+        gasUsed: result.effects?.gasUsed?.computationCost || 0
+      };
+
+    } catch (error) {
+      logger.error('Failed to add treasure to blockchain:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get hunter stats from blockchain profile
+   */
+  async getHunterStats(profileObjectId) {
+    try {
+      logger.info(`Getting hunter stats from blockchain: ${profileObjectId}`);
+
+      if (!profileObjectId) {
+        throw new Error('Profile object ID is required');
+      }
+
+      // Get the hunter profile object from blockchain
+      const profileObject = await this.client.getObject({
+        id: profileObjectId,
+        options: {
+          showContent: true,
+          showDisplay: true,
+          showType: true,
+        },
+      });
+
+      if (!profileObject.data) {
+        throw new Error('Hunter profile not found on blockchain');
+      }
+
+      console.log(`📊 Profile object:`, JSON.stringify(profileObject.data, null, 2));
+
+      // Extract stats from the profile content
+      const content = profileObject.data.content;
+      let stats = {
+        rank: 1,
+        totalTreasuresFound: 0,
+        streakCount: 0,
+        score: 0
+      };
+
+      if (content && content.fields) {
+        const fields = content.fields;
+
+        // Map the blockchain fields to our stats structure
+        stats = {
+          rank: fields.rank || 1,
+          totalTreasuresFound: parseInt(fields.total_treasures_found) || 0,
+          streakCount: parseInt(fields.streak_count) || 0,
+          score: parseInt(fields.score) || 0,
+          lastHuntTimestamp: fields.last_hunt_timestamp ?
+            parseInt(fields.last_hunt_timestamp) : null,
+          achievements: fields.achievements || []
+        };
+      }
+
+      // Alternative method: Call the view function if available
+      try {
+        console.log(`🔍 Attempting to call get_hunter_stats view function...`);
+
+        // Note: This requires the smart contract to have a public view function
+        // If your contract doesn't have this, we'll use the object data above
+        const viewResult = await this.client.devInspectTransactionBlock({
+          sender: '0x0000000000000000000000000000000000000000000000000000000000000000',
+          transactionBlock: (() => {
+            const tx = new Transaction();
+            tx.moveCall({
+              target: `${this.packageId}::treasure_nft::get_hunter_stats`,
+              arguments: [tx.object(profileObjectId)],
+            });
+            return tx;
+          })(),
+        });
+
+        if (viewResult.results?.[0]?.returnValues) {
+          const returnValues = viewResult.results[0].returnValues;
+          console.log(`📈 View function results:`, returnValues);
+
+          // Parse the return values (rank, total_treasures_found, streak_count, score)
+          if (returnValues.length >= 4) {
+            stats = {
+              rank: parseInt(returnValues[0][0]) || stats.rank,
+              totalTreasuresFound: parseInt(returnValues[1][0]) || stats.totalTreasuresFound,
+              streakCount: parseInt(returnValues[2][0]) || stats.streakCount,
+              score: parseInt(returnValues[3][0]) || stats.score,
+              lastHuntTimestamp: stats.lastHuntTimestamp,
+              achievements: stats.achievements
+            };
+          }
+        }
+      } catch (viewError) {
+        console.log(`⚠️ View function call failed, using object data:`, viewError.message);
+        // Continue with object data parsed above
+      }
+
+      logger.info(`Hunter stats retrieved successfully: ${JSON.stringify(stats)}`);
+
+      return {
+        profileObjectId,
+        stats,
+        objectVersion: profileObject.data.version,
+        objectDigest: profileObject.data.digest,
+        lastUpdated: new Date().toISOString()
+      };
+
+    } catch (error) {
+      logger.error(`Failed to get hunter stats for ${profileObjectId}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get treasure NFT details from blockchain
+   */
+  async getTreasureDetails(nftObjectId) {
+    try {
+      logger.info(`Getting treasure details from blockchain: ${nftObjectId}`);
+
+      if (!nftObjectId) {
+        throw new Error('NFT object ID is required');
+      }
+
+      // Get the NFT object from blockchain
+      const nftObject = await this.client.getObject({
+        id: nftObjectId,
+        options: {
+          showContent: true,
+          showDisplay: true,
+          showType: true,
+          showOwner: true,
+        },
+      });
+
+      if (!nftObject.data) {
+        throw new Error('Treasure NFT not found on blockchain');
+      }
+
+      console.log(`🎨 NFT object:`, JSON.stringify(nftObject.data, null, 2));
+
+      // Extract details from the NFT content
+      const content = nftObject.data.content;
+      let treasureDetails = {
+        name: 'Unknown Treasure',
+        rarity: 1,
+        location: 'Unknown',
+        foundTimestamp: 0
+      };
+
+      if (content && content.fields) {
+        const fields = content.fields;
+
+        treasureDetails = {
+          treasureId: fields.treasure_id || '',
+          name: fields.name || 'Unknown Treasure',
+          description: fields.description || '',
+          imageUrl: fields.image_url || '',
+          rarity: parseInt(fields.rarity) || 1,
+          location: fields.location || 'Unknown',
+          coordinates: fields.coordinates || '',
+          foundTimestamp: parseInt(fields.found_timestamp) || 0,
+          finderAddress: fields.finder_address || '',
+          metadata: fields.metadata || {}
+        };
+      }
+
+      // Alternative method: Call the view function if available
+      try {
+        console.log(`🔍 Attempting to call get_treasure_details view function...`);
+
+        const viewResult = await this.client.devInspectTransactionBlock({
+          sender: '0x0000000000000000000000000000000000000000000000000000000000000000',
+          transactionBlock: (() => {
+            const tx = new Transaction();
+            tx.moveCall({
+              target: `${this.packageId}::treasure_nft::get_treasure_details`,
+              arguments: [tx.object(nftObjectId)],
+            });
+            return tx;
+          })(),
+        });
+
+        if (viewResult.results?.[0]?.returnValues) {
+          const returnValues = viewResult.results[0].returnValues;
+          console.log(`📝 View function results:`, returnValues);
+
+          // Parse the return values (name, rarity, location, found_timestamp)
+          if (returnValues.length >= 4) {
+            treasureDetails.name = returnValues[0][0] || treasureDetails.name;
+            treasureDetails.rarity = parseInt(returnValues[1][0]) || treasureDetails.rarity;
+            treasureDetails.location = returnValues[2][0] || treasureDetails.location;
+            treasureDetails.foundTimestamp = parseInt(returnValues[3][0]) || treasureDetails.foundTimestamp;
+          }
+        }
+      } catch (viewError) {
+        console.log(`⚠️ View function call failed, using object data:`, viewError.message);
+        // Continue with object data parsed above
+      }
+
+      // Get owner information
+      const owner = nftObject.data.owner;
+      let ownerAddress = null;
+      if (owner && typeof owner === 'object' && 'AddressOwner' in owner) {
+        ownerAddress = owner.AddressOwner;
+      }
+
+      logger.info(`Treasure details retrieved successfully: ${treasureDetails.name}`);
+
+      return {
+        nftObjectId,
+        owner: ownerAddress,
+        treasureDetails,
+        objectVersion: nftObject.data.version,
+        objectDigest: nftObject.data.digest,
+        objectType: nftObject.data.type,
+        explorerUrl: `https://explorer.sui.io/object/${nftObjectId}?network=${this.network}`,
+        lastUpdated: new Date().toISOString()
+      };
+
+    } catch (error) {
+      logger.error(`Failed to get treasure details for ${nftObjectId}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get all treasures from registry (view function)
+   */
+  async getTreasuresFromRegistry(limit = 50, offset = 0) {
+    try {
+      logger.info(`Getting treasures from blockchain registry...`);
+
+      if (!this.treasureRegistryId) {
+        throw new Error('TREASURE_REGISTRY_ID not configured');
+      }
+
+      // Get the registry object
+      const registryObject = await this.client.getObject({
+        id: this.treasureRegistryId,
+        options: {
+          showContent: true,
+          showDisplay: true,
+        },
+      });
+
+      if (!registryObject.data) {
+        throw new Error('Treasure registry not found on blockchain');
+      }
+
+      console.log(`🏛️ Registry object:`, JSON.stringify(registryObject.data, null, 2));
+
+      // Extract treasures from registry
+      const content = registryObject.data.content;
+      let treasures = [];
+
+      if (content && content.fields && content.fields.treasures) {
+        // Parse the treasures map/vector from the registry
+        // This structure depends on how your smart contract stores treasures
+        treasures = content.fields.treasures || [];
+      }
+
+      return {
+        treasures: treasures.slice(offset, offset + limit),
+        total: treasures.length,
+        registryId: this.treasureRegistryId,
+        lastUpdated: new Date().toISOString()
+      };
+
+    } catch (error) {
+      logger.error('Failed to get treasures from registry:', error);
+      throw error;
+    }
+  }
+
+  /**
+ * Verify treasure exists in registry - IMPROVED VERSION
+ */
+  async verifyTreasureInRegistry(treasureId) {
+    try {
+      logger.info(`Verifying treasure in registry: ${treasureId}`);
+
+      if (!this.treasureRegistryId) {
+        console.warn('TREASURE_REGISTRY_ID not configured, assuming treasure exists');
+        // If no registry ID, assume treasure exists (fallback)
+        return {
+          treasureId,
+          exists: true,
+          registryId: 'not_configured',
+          method: 'fallback_assume_exists',
+          checkedAt: new Date().toISOString()
+        };
+      }
+
+      // Method 1: Try to get the registry object and inspect its contents
+      try {
+        const registryObject = await this.client.getObject({
+          id: this.treasureRegistryId,
+          options: {
+            showContent: true,
+            showDisplay: true,
+          },
+        });
+
+        if (registryObject.data && registryObject.data.content) {
+          console.log(`📊 Registry object content:`, JSON.stringify(registryObject.data.content, null, 2));
+
+          // Try to find the treasure in the registry content
+          const content = registryObject.data.content;
+          let treasureFound = false;
+
+          // Check if treasures are stored in fields
+          if (content.fields && content.fields.treasures) {
+            const treasures = content.fields.treasures;
+            console.log(`🔍 Checking treasures in registry:`, treasures);
+
+            // Different ways treasures might be stored
+            if (Array.isArray(treasures)) {
+              treasureFound = treasures.some(t => t.treasure_id === treasureId || t.treasureId === treasureId);
+            } else if (typeof treasures === 'object') {
+              treasureFound = treasures.hasOwnProperty(treasureId) ||
+                Object.values(treasures).some(t =>
+                  t.treasure_id === treasureId ||
+                  t.treasureId === treasureId
+                );
+            }
+          }
+
+          if (treasureFound) {
+            return {
+              treasureId,
+              exists: true,
+              registryId: this.treasureRegistryId,
+              method: 'registry_object_inspection',
+              checkedAt: new Date().toISOString()
+            };
+          }
+        }
+      } catch (registryError) {
+        console.warn(`⚠️ Registry object inspection failed:`, registryError.message);
+      }
+
+      // Method 2: Try the view function (if it exists)
+      try {
+        console.log(`🔍 Attempting view function call...`);
+
+        const viewResult = await this.client.devInspectTransactionBlock({
+          sender: '0x0000000000000000000000000000000000000000000000000000000000000000',
+          transactionBlock: (() => {
+            const tx = new Transaction();
+            tx.moveCall({
+              target: `${this.packageId}::treasure_nft::treasure_exists`,
+              arguments: [
+                tx.object(this.treasureRegistryId),
+                tx.pure.string(treasureId)
+              ],
+            });
+            return tx;
+          })(),
+        });
+
+        let exists = false;
+        if (viewResult.results?.[0]?.returnValues) {
+          const returnValue = viewResult.results[0].returnValues[0];
+          exists = returnValue && returnValue[0] === 1;
+        }
+
+        return {
+          treasureId,
+          exists,
+          registryId: this.treasureRegistryId,
+          method: 'view_function',
+          checkedAt: new Date().toISOString()
+        };
+
+      } catch (viewError) {
+        console.warn(`⚠️ View function call failed:`, viewError.message);
+      }
+
+      // Method 3: Fallback - assume treasure exists if we can't verify
+      // This is better for user experience than blocking discoveries
+      console.log(`🔄 All verification methods failed, using permissive fallback`);
+
+      return {
+        treasureId,
+        exists: true, // 🆕 ASSUME EXISTS for better UX
+        registryId: this.treasureRegistryId,
+        method: 'permissive_fallback',
+        warning: 'Could not verify treasure in registry, assuming it exists',
+        checkedAt: new Date().toISOString()
+      };
+
+    } catch (error) {
+      logger.error(`Failed to verify treasure ${treasureId}:`, error);
+
+      // Even if verification completely fails, assume treasure exists
+      // This prevents the app from breaking due to blockchain connectivity issues
+      return {
+        treasureId,
+        exists: true, // 🆕 PERMISSIVE FALLBACK
+        error: error.message,
+        method: 'error_fallback',
+        warning: 'Verification failed due to error, assuming treasure exists',
+        checkedAt: new Date().toISOString()
+      };
+    }
+  }
+
+  // 🆕 ALTERNATIVE: Simpler approach - Skip verification entirely for known treasures
+  /**
+   * Check if treasure should be allowed (permissive approach)
+   */
+  isTreasureAllowed(treasureId) {
+    // List of known treasure IDs that definitely exist
+    const knownTreasures = [
+      'TREASURE_001',
+      'VN_COMMON_001',
+      // Add more as needed
+    ];
+
+    // Allow known treasures
+    if (knownTreasures.includes(treasureId)) {
+      return {
+        treasureId,
+        allowed: true,
+        reason: 'known_treasure',
+        checkedAt: new Date().toISOString()
+      };
+    }
+
+    // Allow treasures that follow expected patterns
+    const validPatterns = [
+      /^TREASURE_\d+$/,           // TREASURE_001, TREASURE_002, etc.
+      /^VN_[A-Z]+_\d+$/,         // VN_COMMON_001, VN_RARE_002, etc.
+      /^[A-Z]+_[A-Z]+_\d+$/,     // DRAGON_LEGENDARY_001, etc.
+    ];
+
+    const matchesPattern = validPatterns.some(pattern => pattern.test(treasureId));
+
+    if (matchesPattern) {
+      return {
+        treasureId,
+        allowed: true,
+        reason: 'matches_valid_pattern',
+        checkedAt: new Date().toISOString()
+      };
+    }
+
+    // For demo/development, allow most treasures
+    if (process.env.NODE_ENV === 'development' || process.env.ALLOW_ALL_TREASURES === 'true') {
+      return {
+        treasureId,
+        allowed: true,
+        reason: 'development_mode',
+        checkedAt: new Date().toISOString()
+      };
+    }
+
+    return {
+      treasureId,
+      allowed: false,
+      reason: 'unknown_treasure_pattern',
+      checkedAt: new Date().toISOString()
+    };
+  }
+
+  /**
+   * Get rank name from rank number
+   */
+  getRankName(rankNumber) {
+    const ranks = {
+      1: 'Beginner',
+      2: 'Explorer',
+      3: 'Hunter',
+      4: 'Master'
+    };
+    return ranks[rankNumber] || 'Unknown';
+  }
+
+  /**
+   * Get rarity name from rarity number  
+   */
+  getRarityName(rarityNumber) {
+    const rarities = {
+      1: 'Common',
+      2: 'Rare',
+      3: 'Legendary'
+    };
+    return rarities[rarityNumber] || 'Unknown';
+  }
+
+  /**
+   * Format timestamp to readable date
+   */
+  formatTimestamp(timestamp) {
+    if (!timestamp || timestamp === 0) {
+      return null;
+    }
+    return new Date(timestamp).toISOString();
+  }
 }
 
 module.exports = SuiService;

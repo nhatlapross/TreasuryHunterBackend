@@ -216,56 +216,60 @@ router.get('/nfts', auth, asyncHandler(async (req, res) => {
       });
     }
 
-    console.log(`🖼️ Getting NFTs for wallet: ${user.suiAddress}`);
-
-    // Get NFTs from Sui blockchain
-    const suiService = new SuiService();
-    let blockchainNFTs = [];
-    
-    try {
-      blockchainNFTs = await suiService.getOwnedNFTs(user.suiAddress);
-      console.log(`✅ Found ${blockchainNFTs.length} NFTs on blockchain`);
-    } catch (error) {
-      console.warn('⚠️ Failed to get blockchain NFTs:', error.message);
-    }
-
-    // Get treasure discoveries from database
+    // Get discoveries from database
     const discoveries = await TreasureDiscovery.find({ userId })
       .populate('treasureId', 'name description rarity imageUrl')
       .sort({ discoveredAt: -1 });
 
-    console.log(`📊 Found ${discoveries.length} treasure discoveries in database`);
+    const suiService = new SuiService();
 
-    // Format NFTs
-    const nfts = discoveries.map(discovery => {
-      // Try to find matching blockchain NFT
-      const blockchainNFT = blockchainNFTs.find(nft => 
-        nft.data?.objectId === discovery.nftObjectId
-      );
+    // 🆕 GET: Enhanced NFT details from blockchain
+    const enhancedNFTs = await Promise.all(
+      discoveries.map(async (discovery) => {
+        let blockchainDetails = null;
+        
+        try {
+          if (discovery.nftObjectId && discovery.nftObjectId !== `offline_${discovery.discoveredAt?.getTime()}`) {
+            blockchainDetails = await suiService.getTreasureDetails(discovery.nftObjectId);
+          }
+        } catch (error) {
+          console.warn(`⚠️ Failed to get blockchain details for NFT ${discovery.nftObjectId}:`, error.message);
+        }
 
-      return {
-        id: discovery._id,
-        nftObjectId: discovery.nftObjectId,
-        treasureId: discovery.treasureId,
-        name: discovery.treasureId?.name || 'Unknown Treasure',
-        description: discovery.treasureId?.description || '',
-        rarity: discovery.treasureId?.rarity || 1,
-        rarityName: getRarityName(discovery.treasureId?.rarity || 1),
-        imageUrl: discovery.treasureId?.imageUrl || 'https://via.placeholder.com/300',
-        discoveredAt: discovery.discoveredAt,
-        location: discovery.locationProof || {},
-        transactionDigest: discovery.transactionDigest,
-        onChain: !!blockchainNFT,
-        blockchainData: blockchainNFT?.data || null,
-        explorerUrl: discovery.nftObjectId ? 
-          `https://explorer.sui.io/object/${discovery.nftObjectId}?network=${process.env.SUI_NETWORK || 'testnet'}` : 
-          null
-      };
-    });
+        return {
+          id: discovery._id,
+          nftObjectId: discovery.nftObjectId,
+          // Database data
+          database: {
+            treasureId: discovery.treasureId?._id,
+            name: discovery.treasureId?.name || 'Unknown Treasure',
+            description: discovery.treasureId?.description || '',
+            rarity: discovery.treasureId?.rarity || 1,
+            imageUrl: discovery.treasureId?.imageUrl || '',
+            discoveredAt: discovery.discoveredAt
+          },
+          // Blockchain data
+          blockchain: blockchainDetails ? {
+            name: blockchainDetails.treasureDetails.name,
+            rarity: blockchainDetails.treasureDetails.rarity,
+            location: blockchainDetails.treasureDetails.location,
+            foundTimestamp: blockchainDetails.treasureDetails.foundTimestamp,
+            finderAddress: blockchainDetails.treasureDetails.finderAddress,
+            owner: blockchainDetails.owner,
+            explorerUrl: blockchainDetails.explorerUrl
+          } : null,
+          // Status
+          onChain: !!blockchainDetails,
+          synchronized: blockchainDetails ? 
+            (discovery.treasureId?.name === blockchainDetails.treasureDetails.name) : 
+            false
+        };
+      })
+    );
 
     // Group by rarity for stats
-    const rarityStats = nfts.reduce((acc, nft) => {
-      const rarity = nft.rarityName;
+    const rarityStats = enhancedNFTs.reduce((acc, nft) => {
+      const rarity = getRarityName(nft.database.rarity);
       acc[rarity] = (acc[rarity] || 0) + 1;
       return acc;
     }, {});
@@ -273,10 +277,11 @@ router.get('/nfts', auth, asyncHandler(async (req, res) => {
     res.json({
       success: true,
       data: {
-        nfts,
+        nfts: enhancedNFTs,
         stats: {
-          total: nfts.length,
-          onChain: nfts.filter(nft => nft.onChain).length,
+          total: enhancedNFTs.length,
+          onChain: enhancedNFTs.filter(nft => nft.onChain).length,
+          synchronized: enhancedNFTs.filter(nft => nft.synchronized).length,
           byRarity: rarityStats
         },
         wallet: {
@@ -287,7 +292,7 @@ router.get('/nfts', auth, asyncHandler(async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ Failed to get NFTs:', error);
+    console.error('❌ Failed to get enhanced NFTs:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to get NFT collection',
